@@ -44,7 +44,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     { id: 'new_transfer', label: 'New Transfer', icon: PlusCircle },
     { id: 'active', label: 'Active Transfers', icon: Activity, badge: activeCount },
     { id: 'history', label: 'Transfer History', icon: History },
-    { id: 'drive', label: 'Drive Browser', icon: HardDrive },
+    { id: 'drive', label: 'Drive & Extractor', icon: HardDrive },
     { id: 'library', label: 'Emulator Library', icon: Gamepad2 },
     { id: 'settings', label: 'Settings', icon: Settings },
     { id: 'security', label: 'Security & Privacy', icon: ShieldCheck },

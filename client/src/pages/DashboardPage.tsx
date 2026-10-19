@@ -8,6 +8,7 @@ import {
   Plus,
   AlertCircle,
   ShieldAlert,
+  PackageOpen,
 } from 'lucide-react';
 import { Transfer, GoogleAuthStatus, DriveQuota } from '../types/index.js';
 import { TransferCard } from '../components/TransferCard.js';
@@ -220,6 +221,29 @@ export const DashboardPage: React.FC<DashboardPageProps> = ({
           </div>
         )}
       </div>
+
+      {/* Cloud Archive Extractor Callout */}
+      {completedTransfers.some((t) => t.filename.toLowerCase().endsWith('.zip') || t.filename.toLowerCase().endsWith('.rar')) && (
+        <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <PackageOpen className="w-5 h-5 text-amber-400 shrink-0" />
+            <div>
+              <h4 className="text-sm font-semibold text-amber-200">
+                Cloud Archive Extractor Ready
+              </h4>
+              <p className="text-xs text-amber-300/80">
+                You have ZIP or RAR archives saved in your Google Drive. Click "Extract in Drive" on any card below or open Drive & Extractor.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => onNavigate('drive')}
+            className="px-3.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-zinc-950 font-semibold text-xs transition shrink-0 self-start sm:self-center"
+          >
+            Open Drive & Extractor
+          </button>
+        </div>
+      )}
 
       {/* Recent History Preview */}
       <div className="space-y-4">

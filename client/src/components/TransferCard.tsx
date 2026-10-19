@@ -9,6 +9,8 @@ import {
   ExternalLink,
   AlertTriangle,
   Folder,
+  PackageOpen,
+  CheckCircle2,
 } from 'lucide-react';
 import { Transfer } from '../types/index.js';
 import { formatBytes, formatSpeed, formatEta, formatDate } from '../lib/formatters.js';
@@ -42,6 +44,71 @@ export const TransferCard: React.FC<TransferCardProps> = ({ transfer, onRefresh 
       percentage = Math.min(100, Number((transferred * 10000n) / total) / 100);
     }
   }
+
+  const isArchive =
+    transfer.filename.toLowerCase().endsWith('.zip') ||
+    transfer.filename.toLowerCase().endsWith('.rar');
+  const [showExtractModal, setShowExtractModal] = useState(false);
+  const [extractPassword, setExtractPassword] = useState('');
+  const [deleteArchiveAfter, setDeleteArchiveAfter] = useState(false);
+  const [isExtracting, setIsExtracting] = useState(false);
+  const [extractStatus, setExtractStatus] = useState<{
+    status: 'IDLE' | 'EXTRACTING' | 'COMPLETED' | 'FAILED';
+    currentFile?: string;
+    filesExtracted?: number;
+    outputFolderId?: string;
+    errorMessage?: string;
+  }>({ status: 'IDLE' });
+
+  const handleStartExtraction = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!transfer.driveFileId) {
+      alert('Google Drive file reference not found.');
+      return;
+    }
+
+    setIsExtracting(true);
+    setExtractStatus({
+      status: 'EXTRACTING',
+      currentFile: 'Connecting to Google Drive...',
+      filesExtracted: 0,
+    });
+
+    try {
+      const res = await api.extractDriveArchive({
+        fileId: transfer.driveFileId,
+        password: extractPassword.trim() || undefined,
+        deleteArchiveAfter,
+      });
+
+      const es = new EventSource('/api/drive/extract/events');
+      es.addEventListener('extract_progress', (ev) => {
+        try {
+          const data = JSON.parse(ev.data);
+          if (data.extractionId === res.extractionId) {
+            setExtractStatus({
+              status: data.status,
+              currentFile: data.currentFile,
+              filesExtracted: data.filesExtracted,
+              outputFolderId: data.outputFolderId,
+              errorMessage: data.errorMessage,
+            });
+            if (data.status === 'COMPLETED' || data.status === 'FAILED') {
+              setIsExtracting(false);
+              es.close();
+              onRefresh();
+            }
+          }
+        } catch {}
+      });
+    } catch (err: any) {
+      setIsExtracting(false);
+      setExtractStatus({
+        status: 'FAILED',
+        errorMessage: err.message,
+      });
+    }
+  };
 
   const handleAction = async (action: () => Promise<any>) => {
     setActionLoading(true);
@@ -137,6 +204,20 @@ export const TransferCard: React.FC<TransferCardProps> = ({ transfer, onRefresh 
             </button>
           )}
 
+          {isCompleted && isArchive && (
+            <button
+              onClick={() => {
+                setShowExtractModal(true);
+                setExtractStatus({ status: 'IDLE' });
+              }}
+              title="Extract Archive directly in Google Drive"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/20 border border-amber-500/50 hover:bg-amber-500/30 text-amber-300 font-semibold text-xs transition shadow-xs mr-1"
+            >
+              <PackageOpen className="w-4 h-4 text-amber-400" />
+              <span>Extract in Drive</span>
+            </button>
+          )}
+
           <button
             onClick={openLogs}
             title="View Technical Logs"
@@ -195,17 +276,31 @@ export const TransferCard: React.FC<TransferCardProps> = ({ transfer, onRefresh 
           )}
 
           {isCompleted && (
-            <div className="text-emerald-400 flex items-center gap-1.5">
-              <span>Saved in Drive</span>
-              {transfer.driveFileId && (
-                <a
-                  href={`https://drive.google.com/file/d/${transfer.driveFileId}/view`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="hover:underline inline-flex items-center gap-0.5 text-sky-400"
+            <div className="flex items-center gap-2">
+              <div className="text-emerald-400 flex items-center gap-1.5">
+                <span>Saved in Drive</span>
+                {transfer.driveFileId && (
+                  <a
+                    href={`https://drive.google.com/file/d/${transfer.driveFileId}/view`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="hover:underline inline-flex items-center gap-0.5 text-sky-400"
+                  >
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                )}
+              </div>
+              {isArchive && (
+                <button
+                  onClick={() => {
+                    setShowExtractModal(true);
+                    setExtractStatus({ status: 'IDLE' });
+                  }}
+                  className="ml-2 px-2 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 hover:bg-amber-500/30 text-amber-300 font-semibold text-[11px] inline-flex items-center gap-1 transition shadow-xs"
                 >
-                  <ExternalLink className="w-3 h-3" />
-                </a>
+                  <PackageOpen className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Extract in Google Drive</span>
+                </button>
               )}
             </div>
           )}
@@ -223,6 +318,135 @@ export const TransferCard: React.FC<TransferCardProps> = ({ transfer, onRefresh 
           </div>
         </div>
       )}
+
+      {/* Extraction Modal */}
+      <Modal
+        isOpen={showExtractModal}
+        onClose={() => {
+          if (!isExtracting) {
+            setShowExtractModal(false);
+          }
+        }}
+        title={`Extract Archive: ${transfer.filename}`}
+        maxWidth="lg"
+      >
+        <div className="space-y-4 text-xs">
+          {extractStatus.status === 'EXTRACTING' ? (
+            <div className="py-8 space-y-4 text-center">
+              <div className="w-12 h-12 mx-auto rounded-full bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 animate-spin">
+                <PackageOpen className="w-6 h-6" />
+              </div>
+              <div className="space-y-1">
+                <h4 className="font-semibold text-zinc-100 text-sm">
+                  Extracting directly in Google Drive...
+                </h4>
+                <p className="text-zinc-400 font-mono text-[11px] truncate max-w-md mx-auto">
+                  {extractStatus.currentFile || 'Unpacking archive entries...'}
+                </p>
+                {extractStatus.filesExtracted !== undefined && extractStatus.filesExtracted > 0 && (
+                  <p className="text-emerald-400 font-mono text-[11px]">
+                    {extractStatus.filesExtracted} files extracted
+                  </p>
+                )}
+              </div>
+              <p className="text-[11px] text-zinc-500">
+                Piping uncompressed stream straight into your Drive folder without consuming local SSD.
+              </p>
+            </div>
+          ) : extractStatus.status === 'COMPLETED' ? (
+            <div className="py-6 space-y-4 text-center">
+              <div className="w-12 h-12 mx-auto rounded-full bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+                <CheckCircle2 className="w-6 h-6" />
+              </div>
+              <div className="space-y-1">
+                <h4 className="font-semibold text-zinc-100 text-sm">Extraction Complete!</h4>
+                <p className="text-zinc-400">
+                  Extracted {extractStatus.filesExtracted || 0} files into destination folder.
+                </p>
+              </div>
+              <div className="flex justify-center gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowExtractModal(false)}
+                  className="px-4 py-2 rounded-lg bg-zinc-800 text-zinc-300 hover:bg-zinc-700 transition"
+                >
+                  Close
+                </button>
+                {extractStatus.outputFolderId && (
+                  <a
+                    href={`https://drive.google.com/drive/folders/${extractStatus.outputFolderId}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="px-4 py-2 rounded-lg bg-emerald-500 text-zinc-950 font-semibold hover:bg-emerald-400 transition inline-flex items-center gap-1.5"
+                  >
+                    <span>Open Extracted Folder in Drive</span>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                )}
+              </div>
+            </div>
+          ) : (
+            <form onSubmit={handleStartExtraction} className="space-y-4">
+              {extractStatus.status === 'FAILED' && (
+                <div className="p-3 bg-rose-950/60 border border-rose-900 rounded-lg flex items-start gap-2 text-rose-300 text-xs">
+                  <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-semibold">Extraction Failed:</span> {extractStatus.errorMessage}
+                  </div>
+                </div>
+              )}
+
+              <p className="text-zinc-400 leading-relaxed">
+                DriveDrop Local will extract the contents of <strong className="text-zinc-200">{transfer.filename}</strong> directly into a new folder in Google Drive named <code className="text-sky-300 font-mono">{transfer.filename.replace(/\.(zip|rar)$/i, '')}_extracted</code>.
+              </p>
+
+              <div>
+                <label className="block font-semibold text-zinc-300 uppercase tracking-wider mb-1.5">
+                  Archive Password (Optional)
+                </label>
+                <input
+                  type="password"
+                  placeholder="Leave empty if archive is not password-protected"
+                  value={extractPassword}
+                  onChange={(e) => setExtractPassword(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-lg bg-zinc-950 border border-zinc-800 text-zinc-100 placeholder-zinc-600 focus:outline-hidden focus:border-sky-500 font-mono text-xs"
+                />
+              </div>
+
+              <div className="pt-2">
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={deleteArchiveAfter}
+                    onChange={(e) => setDeleteArchiveAfter(e.target.checked)}
+                    className="w-4 h-4 rounded border-zinc-700 bg-zinc-950 text-emerald-500 focus:ring-0"
+                  />
+                  <span className="text-zinc-300">
+                    Delete original archive from Google Drive after successful extraction
+                  </span>
+                </label>
+              </div>
+
+              <div className="flex justify-end gap-3 pt-4 border-t border-zinc-800">
+                <button
+                  type="button"
+                  onClick={() => setShowExtractModal(false)}
+                  className="px-4 py-2 rounded-lg bg-zinc-800 text-zinc-300 hover:bg-zinc-700 transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-zinc-950 font-semibold transition flex items-center gap-1.5"
+                >
+                  <PackageOpen className="w-4 h-4 stroke-[2.5]" />
+                  <span>Extract in Google Drive</span>
+                </button>
+              </div>
+            </form>
+          )}
+        </div>
+      </Modal>
 
       {/* Logs Modal */}
       <Modal
