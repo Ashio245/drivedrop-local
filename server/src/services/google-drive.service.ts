@@ -225,4 +225,60 @@ export class GoogleDriveService {
 
     return uploadUrl;
   }
+
+  /**
+   * Retrieves metadata for a specific file in Google Drive.
+   */
+  public async getFileMetadata(fileId: string): Promise<drive_v3.Schema$File> {
+    const drive = await this.getDriveClient();
+    const res = await drive.files.get({
+      fileId,
+      fields: 'id, name, mimeType, size, parents, trashed',
+      supportsAllDrives: true,
+    });
+    return res.data;
+  }
+
+  /**
+   * Returns a readable stream of a file's binary content from Google Drive.
+   */
+  public async getFileStream(fileId: string): Promise<any> {
+    const drive = await this.getDriveClient();
+    const res = await drive.files.get(
+      { fileId, alt: 'media', supportsAllDrives: true },
+      { responseType: 'stream' }
+    );
+    return res.data;
+  }
+
+  /**
+   * Uploads an individual file stream directly into Google Drive.
+   */
+  public async uploadFileStream(params: {
+    name: string;
+    parentId?: string;
+    mimeType?: string;
+    body: any;
+  }): Promise<drive_v3.Schema$File> {
+    const drive = await this.getDriveClient();
+    const fileMetadata: drive_v3.Schema$File = {
+      name: params.name,
+    };
+    if (params.parentId) {
+      fileMetadata.parents = [params.parentId];
+    }
+
+    const res = await drive.files.create({
+      requestBody: fileMetadata,
+      media: {
+        mimeType: params.mimeType || 'application/octet-stream',
+        body: params.body,
+      },
+      fields: 'id, name, mimeType, size, parents',
+      supportsAllDrives: true,
+    });
+
+    return res.data;
+  }
 }
+

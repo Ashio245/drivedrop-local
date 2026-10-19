@@ -96,4 +96,53 @@ export async function driveRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: err.message });
     }
   });
+
+  // Extract ZIP or RAR archive in Google Drive
+  app.post('/extract', async (req, reply) => {
+    const schema = z.object({
+      fileId: z.string().min(1, 'fileId is required'),
+      targetFolderId: z.string().optional(),
+      password: z.string().optional(),
+      deleteArchiveAfter: z.boolean().optional(),
+    });
+
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.errors[0].message });
+    }
+
+    try {
+      const extractorService = (await import('../services/archive-extractor.service.js')).ArchiveExtractorService.getInstance();
+      const result = await extractorService.extractArchive(parsed.data);
+      return result;
+    } catch (err: any) {
+      return reply.status(400).send({ error: err.message });
+    }
+  });
+
+  // SSE progress stream for active extractions
+  app.get('/extract/events', async (req, reply) => {
+    reply.raw.setHeader('Content-Type', 'text/event-stream');
+    reply.raw.setHeader('Cache-Control', 'no-cache');
+    reply.raw.setHeader('Connection', 'keep-alive');
+    reply.raw.flushHeaders();
+
+    reply.raw.write(': connected\n\n');
+
+    const extractorService = (await import('../services/archive-extractor.service.js')).ArchiveExtractorService.getInstance();
+    const onProgress = (event: any) => {
+      reply.raw.write(`event: extract_progress\ndata: ${JSON.stringify(event)}\n\n`);
+    };
+
+    extractorService.on('progress', onProgress);
+
+    const heartbeat = setInterval(() => {
+      reply.raw.write(': ping\n\n');
+    }, 15000);
+
+    req.raw.on('close', () => {
+      clearInterval(heartbeat);
+      extractorService.off('progress', onProgress);
+    });
+  });
 }

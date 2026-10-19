@@ -101,6 +101,16 @@ export const api = {
     request<{ success: boolean }>(`/drive/files/${id}${permanent ? '?permanent=true' : ''}`, {
       method: 'DELETE',
     }),
+  extractDriveArchive: (data: {
+    fileId: string;
+    targetFolderId?: string;
+    password?: string;
+    deleteArchiveAfter?: boolean;
+  }) =>
+    request<{ extractionId: string; outputFolderId: string }>('/drive/extract', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
 
   // Library
   listLibraryItems: (params?: { platform?: string; search?: string }) => {

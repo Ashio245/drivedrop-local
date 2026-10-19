@@ -8,3 +8,4 @@ data/
 server/prisma/data/
 .env
 .env.local
+.vercel
