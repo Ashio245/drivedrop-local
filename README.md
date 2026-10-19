@@ -4,6 +4,9 @@
 
 DriveDrop Local streams files directly from any HTTP/HTTPS direct-download link straight into your personal Google Drive using Google Drive Resumable Uploads. It does not buffer the full file on local disk, does not store files on intermediary servers, and imposes **zero artificial application-level file size caps**.
 
+> 📖 **Detailed Step-by-Step Walkthrough:**  
+> Read the [Complete Local User Guide (`HOW_TO_USE_LOCALLY.md`)](./HOW_TO_USE_LOCALLY.md) for Google Cloud OAuth configuration, transfer controls, and emulator setup.
+
 ---
 
 ## 🌟 Key Features
