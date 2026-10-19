@@ -61,6 +61,8 @@ export const DriveBrowserPage: React.FC<DriveBrowserPageProps> = ({
 
   // Extraction state
   const [extractModalFile, setExtractModalFile] = useState<DriveFile | null>(null);
+  const [isManualExtractOpen, setIsManualExtractOpen] = useState(false);
+  const [manualFileId, setManualFileId] = useState('');
   const [extractPassword, setExtractPassword] = useState('');
   const [deleteArchiveAfter, setDeleteArchiveAfter] = useState(false);
   const [isExtracting, setIsExtracting] = useState(false);
@@ -110,7 +112,15 @@ export const DriveBrowserPage: React.FC<DriveBrowserPageProps> = ({
 
   const handleStartExtraction = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!extractModalFile) return;
+    let targetFileId = extractModalFile?.id;
+    if (!targetFileId && manualFileId.trim()) {
+      const match = manualFileId.match(/[-\w]{25,}/);
+      targetFileId = match ? match[0] : manualFileId.trim();
+    }
+    if (!targetFileId) {
+      alert('Please select an archive file or enter a valid Google Drive file ID.');
+      return;
+    }
 
     setIsExtracting(true);
     setExtractStatus({
@@ -122,7 +132,7 @@ export const DriveBrowserPage: React.FC<DriveBrowserPageProps> = ({
 
     try {
       const res = await api.extractDriveArchive({
-        fileId: extractModalFile.id,
+        fileId: targetFileId,
         targetFolderId: currentFolderId || undefined,
         password: extractPassword.trim() || undefined,
         deleteArchiveAfter,
@@ -258,6 +268,21 @@ export const DriveBrowserPage: React.FC<DriveBrowserPageProps> = ({
 
         <div className="flex items-center gap-3">
           <button
+            onClick={() => {
+              setExtractModalFile(null);
+              setManualFileId('');
+              setIsManualExtractOpen(true);
+              setExtractPassword('');
+              setDeleteArchiveAfter(false);
+              setExtractStatus({ status: 'IDLE' });
+            }}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500/15 border border-amber-500/40 hover:bg-amber-500/25 text-amber-300 font-medium text-xs transition shadow-xs"
+            title="Extract ZIP or RAR archive in Google Drive"
+          >
+            <PackageOpen className="w-4 h-4 text-amber-400" />
+            <span>Extract Archive</span>
+          </button>
+          <button
             onClick={loadFiles}
             className="p-2 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-zinc-200 transition"
             title="Refresh folder"
@@ -350,8 +375,13 @@ export const DriveBrowserPage: React.FC<DriveBrowserPageProps> = ({
                       <File className="w-5 h-5 text-zinc-400 shrink-0" />
                     )}
                     <div className="min-w-0 flex-1">
-                      <div className="font-medium text-zinc-200 truncate group-hover:text-sky-300 transition">
-                        {file.name}
+                      <div className="font-medium text-zinc-200 truncate group-hover:text-sky-300 transition flex items-center gap-2">
+                        <span className="truncate">{file.name}</span>
+                        {(file.name.toLowerCase().endsWith('.zip') || file.name.toLowerCase().endsWith('.rar')) && (
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 shrink-0">
+                            {file.name.toLowerCase().endsWith('.rar') ? 'RAR ARCHIVE' : 'ZIP ARCHIVE'}
+                          </span>
+                        )}
                       </div>
                       <div className="text-[11px] text-zinc-500 font-mono truncate">
                         {file.mimeType}
@@ -368,21 +398,24 @@ export const DriveBrowserPage: React.FC<DriveBrowserPageProps> = ({
                     </span>
 
                     {/* Actions */}
-                    <div className="flex items-center gap-1.5 opacity-80 group-hover:opacity-100 transition">
+                    <div className="flex items-center gap-1.5 opacity-90 group-hover:opacity-100 transition">
                       {!isFolder && (
                         <>
                           {(file.name.toLowerCase().endsWith('.zip') || file.name.toLowerCase().endsWith('.rar')) && (
                             <button
                               onClick={() => {
                                 setExtractModalFile(file);
+                                setManualFileId('');
+                                setIsManualExtractOpen(true);
                                 setExtractPassword('');
                                 setDeleteArchiveAfter(false);
                                 setExtractStatus({ status: 'IDLE' });
                               }}
                               title="Extract Archive directly in Google Drive"
-                              className="p-1 rounded-md hover:bg-zinc-800 text-zinc-400 hover:text-amber-400 transition"
+                              className="flex items-center gap-1 px-2.5 py-1 rounded bg-amber-500/20 border border-amber-500/40 hover:bg-amber-500/30 text-amber-300 font-semibold text-xs transition shadow-xs mr-1"
                             >
-                              <PackageOpen className="w-4 h-4" />
+                              <PackageOpen className="w-3.5 h-3.5 text-amber-400" />
+                              <span>Extract</span>
                             </button>
                           )}
                           <button
@@ -584,14 +617,16 @@ export const DriveBrowserPage: React.FC<DriveBrowserPageProps> = ({
       </Modal>
 
       {/* Extract Archive in Google Drive Modal */}
+      {/* Extract Archive in Google Drive Modal */}
       <Modal
-        isOpen={Boolean(extractModalFile)}
+        isOpen={Boolean(extractModalFile) || isManualExtractOpen}
         onClose={() => {
           if (!isExtracting) {
             setExtractModalFile(null);
+            setIsManualExtractOpen(false);
           }
         }}
-        title={`Extract Archive: ${extractModalFile?.name || ''}`}
+        title={extractModalFile ? `Extract Archive: ${extractModalFile.name}` : 'Extract Archive in Google Drive'}
         maxWidth="lg"
       >
         <div className="space-y-4 text-xs">
@@ -631,7 +666,10 @@ export const DriveBrowserPage: React.FC<DriveBrowserPageProps> = ({
               <div className="flex justify-center gap-3 pt-2">
                 <button
                   type="button"
-                  onClick={() => setExtractModalFile(null)}
+                  onClick={() => {
+                    setExtractModalFile(null);
+                    setIsManualExtractOpen(false);
+                  }}
                   className="px-4 py-2 rounded-lg bg-zinc-800 text-zinc-300 hover:bg-zinc-700 transition"
                 >
                   Close
@@ -640,9 +678,10 @@ export const DriveBrowserPage: React.FC<DriveBrowserPageProps> = ({
                   <button
                     type="button"
                     onClick={() => {
-                      const folderName = `${extractModalFile?.name.replace(/\.(zip|rar)$/i, '')}_extracted`;
+                      const folderName = `${extractModalFile?.name.replace(/\.(zip|rar)$/i, '') || 'archive'}_extracted`;
                       const folderId = extractStatus.outputFolderId!;
                       setExtractModalFile(null);
+                      setIsManualExtractOpen(false);
                       navigateToFolder(folderId, folderName);
                     }}
                     className="px-4 py-2 rounded-lg bg-emerald-500 text-zinc-950 font-semibold hover:bg-emerald-400 transition"
@@ -663,9 +702,50 @@ export const DriveBrowserPage: React.FC<DriveBrowserPageProps> = ({
                 </div>
               )}
 
-              <p className="text-zinc-400 leading-relaxed">
-                DriveDrop Local will extract the contents of <strong className="text-zinc-200">{extractModalFile?.name}</strong> directly into a new folder in Google Drive named <code className="text-sky-300 font-mono">{extractModalFile?.name.replace(/\.(zip|rar)$/i, '')}_extracted</code>.
-              </p>
+              {extractModalFile ? (
+                <div className="p-3 bg-zinc-950 rounded-lg border border-zinc-800 space-y-1">
+                  <span className="text-[11px] uppercase tracking-wider font-semibold text-zinc-400">Target Archive:</span>
+                  <div className="font-medium text-zinc-200 flex items-center gap-2">
+                    <PackageOpen className="w-4 h-4 text-amber-400 shrink-0" />
+                    <span className="truncate">{extractModalFile.name}</span>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <label className="block font-semibold text-zinc-300 uppercase tracking-wider mb-1">
+                    Select Archive or Enter Google Drive File ID / Link
+                  </label>
+                  {files.filter(f => f.name.toLowerCase().endsWith('.zip') || f.name.toLowerCase().endsWith('.rar')).length > 0 ? (
+                    <div className="space-y-1.5 p-2 bg-zinc-950/60 border border-zinc-800 rounded-lg">
+                      <span className="text-[11px] text-zinc-400 font-mono">Found in this folder:</span>
+                      {files.filter(f => f.name.toLowerCase().endsWith('.zip') || f.name.toLowerCase().endsWith('.rar')).map(f => (
+                        <button
+                          key={f.id}
+                          type="button"
+                          onClick={() => {
+                            setExtractModalFile(f);
+                            setManualFileId(f.id);
+                          }}
+                          className="w-full text-left p-2 rounded-md bg-zinc-900 hover:bg-zinc-850 border border-zinc-800 hover:border-amber-500/50 flex items-center justify-between text-xs transition"
+                        >
+                          <span className="text-zinc-200 font-medium truncate">{f.name}</span>
+                          <span className="text-amber-400 font-mono text-[11px] font-semibold">Select</span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                  <input
+                    type="text"
+                    placeholder="e.g. 1a2b3c4d... or full Drive file link"
+                    value={manualFileId}
+                    onChange={(e) => setManualFileId(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-lg bg-zinc-950 border border-zinc-800 text-zinc-100 placeholder-zinc-600 focus:outline-hidden focus:border-sky-500 font-mono text-xs"
+                  />
+                  <p className="text-[11px] text-zinc-500 leading-relaxed">
+                    Archives currently downloading in the Active Stream Monitor will be finalized in Google Drive once complete and can be extracted here.
+                  </p>
+                </div>
+              )}
 
               <div>
                 <label className="block font-semibold text-zinc-300 uppercase tracking-wider mb-1.5">
@@ -689,7 +769,7 @@ export const DriveBrowserPage: React.FC<DriveBrowserPageProps> = ({
                     className="w-4 h-4 rounded border-zinc-700 bg-zinc-950 text-emerald-500 focus:ring-0"
                   />
                   <span className="text-zinc-300">
-                    Delete original {extractModalFile?.name.toLowerCase().endsWith('.rar') ? '.rar' : '.zip'} archive from Google Drive after successful extraction
+                    Delete original archive from Google Drive after successful extraction
                   </span>
                 </label>
               </div>
@@ -697,7 +777,10 @@ export const DriveBrowserPage: React.FC<DriveBrowserPageProps> = ({
               <div className="flex justify-end gap-3 pt-4 border-t border-zinc-800">
                 <button
                   type="button"
-                  onClick={() => setExtractModalFile(null)}
+                  onClick={() => {
+                    setExtractModalFile(null);
+                    setIsManualExtractOpen(false);
+                  }}
                   className="px-4 py-2 rounded-lg bg-zinc-800 text-zinc-300 hover:bg-zinc-700 transition"
                 >
                   Cancel
