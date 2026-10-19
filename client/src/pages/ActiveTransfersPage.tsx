@@ -1,5 +1,5 @@
 import React from 'react';
-import { Activity, Plus, RefreshCw } from 'lucide-react';
+import { Activity, Plus, RefreshCw, AlertTriangle } from 'lucide-react';
 import { Transfer } from '../types/index.js';
 import { TransferCard } from '../components/TransferCard.js';
 import { EmptyState } from '../components/EmptyState.js';
@@ -17,6 +17,9 @@ export const ActiveTransfersPage: React.FC<ActiveTransfersPageProps> = ({
 }) => {
   const activeList = transfers.filter((t) =>
     ['QUEUED', 'CONNECTING', 'STREAMING', 'PAUSED'].includes(t.status)
+  );
+  const interruptedList = transfers.filter((t) =>
+    ['FAILED', 'CANCELLED'].includes(t.status)
   );
 
   return (
@@ -49,7 +52,7 @@ export const ActiveTransfersPage: React.FC<ActiveTransfersPageProps> = ({
         </div>
       </div>
 
-      {activeList.length === 0 ? (
+      {activeList.length === 0 && interruptedList.length === 0 ? (
         <EmptyState
           icon={Activity}
           title="No Active Streams"
@@ -58,11 +61,29 @@ export const ActiveTransfersPage: React.FC<ActiveTransfersPageProps> = ({
           onAction={() => onNavigate('new_transfer')}
         />
       ) : (
-        <div className="space-y-4">
-          {activeList.map((t) => (
-            <TransferCard key={t.id} transfer={t} onRefresh={onRefresh} />
-          ))}
-        </div>
+        <>
+          {activeList.length > 0 && (
+            <div className="space-y-4">
+              {activeList.map((t) => (
+                <TransferCard key={t.id} transfer={t} onRefresh={onRefresh} />
+              ))}
+            </div>
+          )}
+
+          {interruptedList.length > 0 && (
+            <div className="space-y-3 pt-2">
+              <div className="flex items-center gap-2 text-rose-400 text-xs font-semibold uppercase tracking-wider">
+                <AlertTriangle className="w-4 h-4" />
+                <span>Interrupted Transfers ({interruptedList.length}) — Click Retry icon to resume from saved offset</span>
+              </div>
+              <div className="space-y-4">
+                {interruptedList.map((t) => (
+                  <TransferCard key={t.id} transfer={t} onRefresh={onRefresh} />
+                ))}
+              </div>
+            </div>
+          )}
+        </>
       )}
     </div>
   );

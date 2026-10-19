@@ -9,6 +9,37 @@ import { GoogleDriveService } from './google-drive.service.js';
 // Chunk size: 8 MiB (must be multiple of 256 KiB = 262,144 bytes)
 const CHUNK_SIZE = 8 * 1024 * 1024;
 const MAX_REDIRECTS = 5;
+const MAX_AUTO_RETRIES = 10;
+
+function isTransientNetworkError(err: any): boolean {
+  if (!err) return false;
+  const msg = (err.message || '').toLowerCase();
+  const code = (err.code || '').toLowerCase();
+  const name = (err.name || '').toLowerCase();
+  return (
+    msg.includes('econnreset') ||
+    msg.includes('etimedout') ||
+    msg.includes('econnrefused') ||
+    msg.includes('epipe') ||
+    msg.includes('socket hung up') ||
+    msg.includes('und_err_socket') ||
+    msg.includes('und_err_body_timeout') ||
+    msg.includes('und_err_headers_timeout') ||
+    msg.includes('fetch failed') ||
+    msg.includes('premature close') ||
+    msg.includes('terminated') ||
+    msg.includes('network error') ||
+    code === 'econnreset' ||
+    code === 'etimedout' ||
+    code === 'epipe' ||
+    code === 'und_err_socket' ||
+    code === 'und_err_headers_timeout' ||
+    code === 'und_err_body_timeout' ||
+    name === 'socketerror' ||
+    name === 'bodytimeouterror' ||
+    name === 'headerstimeouterror'
+  );
+}
 
 export interface TransferEvent {
   transferId: string;
@@ -268,7 +299,7 @@ export class StreamManagerService extends EventEmitter {
       // 2. Connect to remote source with Range header if resuming
       await prisma.transfer.update({
         where: { id: transferId },
-        data: { status: 'STREAMING' },
+        data: { status: 'STREAMING', errorMessage: null },
       });
       await this.log(transferId, 'INFO', `Beginning direct chunked streaming from byte ${startByte}...`);
 
@@ -512,6 +543,46 @@ export class StreamManagerService extends EventEmitter {
         // Paused or cancelled intentionally
         return;
       }
+
+      const currentTransfer = await prisma.transfer.findUnique({ where: { id: transferId } });
+      const currentRetries = currentTransfer?.retries || 0;
+
+      if (isTransientNetworkError(err) && currentRetries < MAX_AUTO_RETRIES) {
+        const nextRetry = currentRetries + 1;
+        const delayMs = Math.min(15000, 2000 * nextRetry);
+        const retryMsg = `Connection reset by source (${err.message || 'ECONNRESET'}). Auto-resuming from last accepted Drive byte in ${delayMs / 1000}s (attempt ${nextRetry}/${MAX_AUTO_RETRIES})...`;
+
+        await prisma.transfer.update({
+          where: { id: transferId },
+          data: {
+            status: 'CONNECTING',
+            retries: nextRetry,
+            errorMessage: retryMsg,
+            speedBps: 0,
+            etaSeconds: null,
+          },
+        });
+
+        await this.log(transferId, 'WARN', retryMsg);
+
+        if (currentTransfer) {
+          this.emitProgress({
+            ...currentTransfer,
+            status: 'CONNECTING',
+            errorMessage: retryMsg,
+            speedBps: 0,
+            etaSeconds: null,
+          });
+        }
+
+        setTimeout(() => {
+          this.executeTransfer(transferId).catch(async (retryErr) => {
+            await this.handleTransferFailure(transferId, retryErr);
+          });
+        }, delayMs);
+        return;
+      }
+
       await this.handleTransferFailure(transferId, err);
     } finally {
       this.activeJobs.delete(transferId);
