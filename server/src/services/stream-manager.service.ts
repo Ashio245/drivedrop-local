@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events';
+import path from 'path';
 import { request, Dispatcher } from 'undici';
 import { prisma } from '../lib/prisma.js';
 import { validateUrlForSSRF } from '../lib/ssrf.js';
@@ -285,14 +286,51 @@ export class StreamManagerService extends EventEmitter {
         sourceHeaders['Range'] = `bytes=${startByte}-`;
       }
 
-      const res = await request(transfer.sourceUrl, {
-        method: 'GET',
-        headers: sourceHeaders,
-        signal: abortController.signal,
-      });
+      let currentUrl = transfer.sourceUrl;
+      let redirectCount = 0;
+      let res: any;
+
+      while (redirectCount <= MAX_REDIRECTS) {
+        res = await request(currentUrl, {
+          method: 'GET',
+          headers: sourceHeaders,
+          signal: abortController.signal,
+        });
+
+        if ([301, 302, 303, 307, 308].includes(res.statusCode)) {
+          redirectCount++;
+          const location = res.headers['location'] as string;
+          if (!location) {
+            break;
+          }
+          await res.body.dump();
+          const nextUrl = new URL(location, currentUrl).toString();
+          const ssrf = await validateUrlForSSRF(nextUrl);
+          if (!ssrf.isValid) {
+            throw new Error(`SSRF blocked redirect to ${nextUrl}: ${ssrf.error}`);
+          }
+          await this.log(transferId, 'INFO', `Following redirect (${res.statusCode}) to: ${nextUrl}`);
+          currentUrl = nextUrl;
+          continue;
+        }
+
+        break;
+      }
 
       if (res.statusCode >= 400) {
         throw new Error(`Remote source responded with HTTP ${res.statusCode} ${res.headers['status-text'] || ''}`);
+      }
+
+      const contentType = (res.headers['content-type'] as string || '').toLowerCase();
+      const ext = path.extname(transfer.filename).toLowerCase();
+      const binaryExtensions = ['.rar', '.zip', '.7z', '.iso', '.bin', '.chd', '.rvz', '.nsp', '.xci', '.tar', '.gz', '.mp4', '.mkv', '.pkg', '.exe', '.dmg'];
+      if (contentType.includes('text/html') && binaryExtensions.includes(ext)) {
+        await res.body.dump();
+        throw new Error(
+          `The provided link returned an HTML webpage ("text/html") instead of a direct file download. ` +
+          `File-hosting sites (like DataNodes, Rapidgator, Mega, etc.) require clicking through their website, solving CAPTCHAs, or waiting on a timer before generating the direct file link. ` +
+          `To download, right-click the final "Download" button in your browser, copy the actual direct link, and paste that into DriveDrop.`
+        );
       }
 
       // Check if remote accepted Range header if we requested one
@@ -410,24 +448,38 @@ export class StreamManagerService extends EventEmitter {
 
       // 4. Send final remaining chunk (or empty chunk if file is exactly multiple of CHUNK_SIZE)
       const finalBuffer = Buffer.concat(bufferChunks);
-      const finalEndByte = currentOffset + BigInt(finalBuffer.length) - 1n;
+      let finalResult: { id?: string } | null = null;
       const finalTotalBytes = currentOffset + BigInt(finalBuffer.length);
 
-      await this.log(
-        transferId,
-        'INFO',
-        `Sending final chunk (${finalBuffer.length} bytes). Total finalized size: ${finalTotalBytes} bytes.`
-      );
+      if (finalBuffer.length > 0) {
+        const finalEndByte = currentOffset + BigInt(finalBuffer.length) - 1n;
+        await this.log(
+          transferId,
+          'INFO',
+          `Sending final chunk (${finalBuffer.length} bytes). Total finalized size: ${finalTotalBytes} bytes.`
+        );
 
-      const finalResult = await this.uploadChunkToGoogleDrive({
-        resumableUri,
-        chunk: finalBuffer,
-        startByte: currentOffset,
-        endByte: finalEndByte,
-        totalBytes: finalTotalBytes,
-        isComplete: true,
-        signal: abortController.signal,
-      });
+        finalResult = await this.uploadChunkToGoogleDrive({
+          resumableUri,
+          chunk: finalBuffer,
+          startByte: currentOffset,
+          endByte: finalEndByte,
+          totalBytes: finalTotalBytes,
+          isComplete: true,
+          signal: abortController.signal,
+        });
+      } else if (currentOffset === 0n) {
+        // Zero-byte file: Google Drive resumable protocol requires PUT with Content-Length: 0 and Content-Range: bytes */0
+        await this.log(transferId, 'INFO', 'Finalizing 0-byte file in Google Drive...');
+        finalResult = await this.uploadEmptyFileToGoogleDrive({
+          resumableUri,
+          signal: abortController.signal,
+        });
+      } else {
+        // All bytes were already sent in full chunk windows! Finalize by querying Google Drive
+        await this.log(transferId, 'INFO', `Finalizing upload of ${finalTotalBytes} bytes in Google Drive...`);
+        finalResult = await this.finalizeGoogleDriveUpload(resumableUri, finalTotalBytes);
+      }
 
       // Transfer Completed!
       const driveFileId = finalResult?.id || null;
@@ -509,6 +561,63 @@ export class StreamManagerService extends EventEmitter {
 
     const errText = await res.body.text();
     throw new Error(`Google Drive PUT chunk failed (${res.statusCode}): ${errText}`);
+  }
+
+  /**
+   * Finalizes an empty (0 byte) file upload with Google Drive.
+   */
+  private async uploadEmptyFileToGoogleDrive(params: {
+    resumableUri: string;
+    signal?: AbortSignal;
+  }): Promise<{ id?: string } | null> {
+    const res = await request(params.resumableUri, {
+      method: 'PUT',
+      headers: {
+        'Content-Length': '0',
+        'Content-Range': 'bytes */0',
+      },
+      signal: params.signal,
+    });
+
+    if (res.statusCode === 200 || res.statusCode === 201) {
+      const bodyText = await res.body.text();
+      try {
+        return JSON.parse(bodyText);
+      } catch {
+        return null;
+      }
+    }
+
+    const errText = await res.body.text();
+    throw new Error(`Google Drive empty file finalize failed (${res.statusCode}): ${errText}`);
+  }
+
+  /**
+   * Finalizes an upload when all bytes were already accepted in previous chunks.
+   */
+  private async finalizeGoogleDriveUpload(
+    resumableUri: string,
+    totalBytes: bigint
+  ): Promise<{ id?: string } | null> {
+    const res = await request(resumableUri, {
+      method: 'PUT',
+      headers: {
+        'Content-Length': '0',
+        'Content-Range': `bytes */${totalBytes}`,
+      },
+    });
+
+    if (res.statusCode === 200 || res.statusCode === 201) {
+      const bodyText = await res.body.text();
+      try {
+        return JSON.parse(bodyText);
+      } catch {
+        return null;
+      }
+    }
+
+    const errText = await res.body.text();
+    throw new Error(`Google Drive finalize failed (${res.statusCode}): ${errText}`);
   }
 
   /**
