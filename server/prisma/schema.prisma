@@ -1,0 +1,94 @@
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Transfer {
+  id               String        @id @default(cuid())
+  sourceUrl        String
+  filename         String
+  mimeType         String?
+  totalBytes       BigInt?
+  transferredBytes BigInt        @default(0)
+  status           String        @default("QUEUED") // QUEUED, CONNECTING, STREAMING, PAUSED, COMPLETED, FAILED, CANCELLED
+  resumableUri     String?
+  driveFileId      String?
+  driveFolderId    String?
+  customHeaders    String?
+  speedBps         Float         @default(0)
+  etaSeconds       Int?
+  errorMessage     String?
+  retries          Int           @default(0)
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+  completedAt      DateTime?
+  logs             TransferLog[]
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+model TransferLog {
+  id         String   @id @default(cuid())
+  transferId String
+  transfer   Transfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  level      String   // INFO, WARN, ERROR, DEBUG
+  message    String
+  timestamp  DateTime @default(now())
+
+  @@index([transferId])
+}
+
+model GoogleAuth {
+  id                    String    @id @default("primary")
+  userEmail             String?
+  userName              String?
+  userAvatar            String?
+  encryptedRefreshToken String?
+  encryptedAccessToken  String?
+  tokenExpiresAt        DateTime?
+  scope                 String?
+  defaultFolderId       String?
+  emulatorFolderId      String?
+  updatedAt             DateTime  @updatedAt
+}
+
+model AppSetting {
+  id        String   @id
+  value     String
+  isSecret  Boolean  @default(false)
+  updatedAt DateTime @updatedAt
+}
+
+model EmulatorConfig {
+  id             String   @id // Platform slug: e.g. "snes", "ps1", "switch", "gba"
+  platformName   String
+  executablePath String
+  defaultArgs    String?
+  isEnabled      Boolean  @default(true)
+  updatedAt      DateTime @updatedAt
+}
+
+model LibraryItem {
+  id          String   @id @default(cuid())
+  title       String
+  platform    String
+  region      String?
+  version     String?
+  fileType    String?
+  driveFileId String?
+  drivePath   String?
+  localPath   String?
+  artworkUrl  String?
+  tags        String?
+  notes       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([platform])
+  @@index([title])
+}
