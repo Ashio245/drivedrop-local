@@ -5,7 +5,8 @@ import path from 'path';
 import os from 'os';
 import { Readable } from 'stream';
 import unzipper from 'unzipper';
-import { createExtractorFromFile } from 'node-unrar-js';
+import { spawn } from 'child_process';
+import tar from 'tar-stream';
 import { GoogleDriveService } from './google-drive.service.js';
 import { inferMimeTypeFromFilename } from '../lib/sanitize.js';
 
@@ -220,7 +221,8 @@ export class ArchiveExtractorService extends EventEmitter {
   }
 
   /**
-   * Processes a RAR archive by buffering archive stream to a temporary file and extracting.
+   * Processes a RAR archive directly as a stream using bsdtar and tar-stream.
+   * Completely zero-disk: streams directly from Google Drive into Drive with 0 local disk space.
    */
   private async processRarExtraction(params: {
     extractionId: string;
@@ -233,119 +235,157 @@ export class ArchiveExtractorService extends EventEmitter {
     const folderCache = new Map<string, string>();
     folderCache.set('', params.outputFolderId);
 
-    const tempFilePath = path.join(os.tmpdir(), `drivedrop_extract_${params.extractionId}.rar`);
+    // 1. Download stream from Google Drive
+    const driveStream = await driveService.getFileStream(params.fileId);
 
-    try {
-      // 1. Download RAR archive from Google Drive to temp file
-      const driveStream = await driveService.getFileStream(params.fileId);
-      const writeStream = fs.createWriteStream(tempFilePath);
+    // 2. Spawn bsdtar to convert RAR stream directly to standard tar stream on stdout
+    const bsdtarArgs = ['-cf', '-', '@-'];
+    if (params.password) {
+      bsdtarArgs.unshift('--passphrase', params.password);
+    }
 
-      await new Promise<void>((resolve, reject) => {
-        driveStream.pipe(writeStream);
-        writeStream.on('finish', resolve);
-        writeStream.on('error', reject);
-        driveStream.on('error', reject);
-      });
+    const bsdtar = spawn('bsdtar', bsdtarArgs);
+    let bsdtarStderr = '';
+    bsdtar.stderr.on('data', (d) => {
+      bsdtarStderr += d.toString();
+    });
 
-      // 2. Open with node-unrar-js
-      const extractor = await createExtractorFromFile({
-        filepath: tempFilePath,
-        password: params.password,
-      });
+    driveStream.pipe(bsdtar.stdin);
 
-      const list = extractor.getFileList();
-      const headers = [...list.fileHeaders];
-      const totalFiles = headers.filter((h) => !h.flags.directory).length;
+    driveStream.on('error', () => {
+      bsdtar.kill();
+    });
 
-      let filesExtracted = 0;
-      const MAX_FILES = 10000;
+    // 3. Process tar entries on the fly using tar-stream
+    const extract = tar.extract();
+    let filesExtracted = 0;
+    const MAX_FILES = 10000;
 
-      if (headers.length > MAX_FILES) {
-        throw new Error(`Decompression safety limit exceeded: RAR archive contains ${headers.length} entries.`);
-      }
-
-      // 3. Extract and upload files
-      for (const header of headers) {
+    await new Promise<void>((resolve, reject) => {
+      extract.on('entry', async (header, stream, next) => {
         if (this.activeJobs.get(params.extractionId)?.abort) {
-          break;
+          stream.resume();
+          bsdtar.kill();
+          driveStream.destroy();
+          return next();
+        }
+
+        filesExtracted++;
+        if (filesExtracted > MAX_FILES) {
+          stream.resume();
+          bsdtar.kill();
+          driveStream.destroy();
+          return reject(
+            new Error(`Decompression safety limit exceeded: archive contains over ${MAX_FILES} entries.`)
+          );
         }
 
         const safePath = this.sanitizeArchivePath(header.name);
-        if (!safePath) continue;
+        if (!safePath) {
+          stream.resume();
+          return next();
+        }
 
-        const isDir = header.flags.directory;
+        const isDir = header.type === 'directory';
         const dirName = path.dirname(safePath);
         const fileName = path.basename(safePath);
 
         let currentParentId = params.outputFolderId;
         if (dirName && dirName !== '.') {
-          currentParentId = await this.ensureDriveDirectoryHierarchy(
-            dirName,
-            params.outputFolderId,
-            folderCache
-          );
+          try {
+            currentParentId = await this.ensureDriveDirectoryHierarchy(
+              dirName,
+              params.outputFolderId,
+              folderCache
+            );
+          } catch {
+            // fallback
+          }
         }
 
         if (isDir) {
-          await this.ensureDriveDirectoryHierarchy(
-            safePath,
-            params.outputFolderId,
-            folderCache
-          );
-          continue;
+          try {
+            await this.ensureDriveDirectoryHierarchy(
+              safePath,
+              params.outputFolderId,
+              folderCache
+            );
+          } catch {}
+          stream.resume();
+          return next();
         }
 
-        filesExtracted++;
         this.emit('progress', {
           extractionId: params.extractionId,
           fileId: params.fileId,
           status: 'EXTRACTING',
           currentFile: fileName,
           filesExtracted,
-          totalFiles,
+          totalFiles: filesExtracted,
           outputFolderId: params.outputFolderId,
         });
 
-        // Extract single file buffer
-        const extracted = extractor.extract({ files: [header.name] });
-        const extractedFiles = [...extracted.files];
-        const fileData = extractedFiles[0]?.extraction;
-
-        if (fileData) {
-          const buffer = Buffer.from(fileData);
+        try {
           const mimeType = inferMimeTypeFromFilename(fileName);
-
           await driveService.uploadFileStream({
             name: fileName,
             parentId: currentParentId,
             mimeType,
-            body: Readable.from(buffer),
+            body: stream,
+            totalBytes: header.size ? BigInt(header.size) : undefined,
           });
+          next();
+        } catch (uploadErr) {
+          stream.resume();
+          bsdtar.kill();
+          driveStream.destroy();
+          reject(uploadErr);
         }
-      }
-
-      // Success!
-      if (params.deleteArchiveAfter) {
-        try {
-          await driveService.deleteFile(params.fileId);
-        } catch {
-          // Ignore
-        }
-      }
-
-      this.emit('progress', {
-        extractionId: params.extractionId,
-        fileId: params.fileId,
-        status: 'COMPLETED',
-        currentFile: 'Extraction Complete',
-        filesExtracted,
-        totalFiles,
-        outputFolderId: params.outputFolderId,
       });
-    } finally {
-      // Clean up temp file safely
-      await fsp.rm(tempFilePath, { force: true }).catch(() => {});
+
+      extract.on('finish', () => resolve());
+      extract.on('error', (err) => {
+        bsdtar.kill();
+        driveStream.destroy();
+        reject(err);
+      });
+      bsdtar.on('error', (err) => {
+        driveStream.destroy();
+        reject(err);
+      });
+      bsdtar.on('close', (code) => {
+        if (code !== 0 && filesExtracted === 0) {
+          reject(
+            new Error(
+              `Archive extraction failed: ${bsdtarStderr.trim() || 'Unsupported or corrupted RAR archive'}`
+            )
+          );
+        } else {
+          resolve();
+        }
+      });
+
+      bsdtar.stdout.pipe(extract);
+    });
+
+    // Success!
+    if (params.deleteArchiveAfter) {
+      try {
+        await driveService.deleteFile(params.fileId);
+      } catch {
+        // Ignore
+      }
     }
+
+    this.emit('progress', {
+      extractionId: params.extractionId,
+      fileId: params.fileId,
+      status: 'COMPLETED',
+      currentFile: 'Extraction Complete',
+      filesExtracted,
+      totalFiles: filesExtracted,
+      outputFolderId: params.outputFolderId,
+    });
   }
 
   /**

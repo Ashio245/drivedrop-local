@@ -1,4 +1,5 @@
 import { google, drive_v3 } from 'googleapis';
+import { request } from 'undici';
 import { GoogleAuthService } from './google-auth.service.js';
 
 export interface DriveQuota {
@@ -252,33 +253,154 @@ export class GoogleDriveService {
   }
 
   /**
-   * Uploads an individual file stream directly into Google Drive.
+   * Uploads any stream directly into Google Drive via chunked resumable upload.
+   * Completely zero-disk overhead: streams through memory in 8MB chunks.
+   */
+  public async uploadStreamChunked(params: {
+    name: string;
+    parentId?: string;
+    mimeType?: string;
+    body: any;
+    totalBytes?: bigint;
+    signal?: AbortSignal;
+  }): Promise<{ id?: string; name: string }> {
+    const CHUNK_SIZE = 8 * 1024 * 1024; // 8 MiB
+
+    // 1. Initiate resumable upload session with Google Drive
+    const resumableUri = await this.initiateResumableUpload({
+      filename: params.name,
+      mimeType: params.mimeType,
+      parentFolderId: params.parentId,
+      totalBytes: params.totalBytes || null,
+    });
+
+    // 2. Pump stream chunks
+    let bufferChunks: Buffer[] = [];
+    let bufferLength = 0;
+    let currentOffset = 0n;
+    let driveFileId: string | undefined;
+
+    for await (const chunk of params.body) {
+      if (params.signal?.aborted) {
+        throw new Error('Upload aborted');
+      }
+
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      bufferChunks.push(buf);
+      bufferLength += buf.length;
+
+      if (bufferLength >= CHUNK_SIZE) {
+        const combined = Buffer.concat(bufferChunks);
+        const toSend = combined.subarray(0, CHUNK_SIZE);
+        const remainder = combined.subarray(CHUNK_SIZE);
+
+        const endByte = currentOffset + BigInt(toSend.length) - 1n;
+        const totalStr = params.totalBytes ? params.totalBytes.toString() : '*';
+
+        const res = await request(resumableUri, {
+          method: 'PUT',
+          headers: {
+            'Content-Length': toSend.length.toString(),
+            'Content-Range': `bytes ${currentOffset}-${endByte}/${totalStr}`,
+          },
+          body: toSend,
+          signal: params.signal,
+        });
+
+        if (res.statusCode === 200 || res.statusCode === 201) {
+          const bodyText = await res.body.text();
+          try {
+            const json = JSON.parse(bodyText);
+            driveFileId = json.id;
+          } catch {}
+        } else if (res.statusCode === 308) {
+          await res.body.dump();
+        } else {
+          const errText = await res.body.text();
+          throw new Error(`Google Drive upload chunk failed (${res.statusCode}): ${errText}`);
+        }
+
+        currentOffset += BigInt(toSend.length);
+        bufferChunks = remainder.length > 0 ? [remainder] : [];
+        bufferLength = remainder.length;
+      }
+    }
+
+    // 3. Finalize remaining chunk
+    const finalBuffer = Buffer.concat(bufferChunks);
+    const finalTotal = currentOffset + BigInt(finalBuffer.length);
+    const endByte = finalTotal > 0n ? finalTotal - 1n : 0n;
+
+    if (finalBuffer.length > 0) {
+      const res = await request(resumableUri, {
+        method: 'PUT',
+        headers: {
+          'Content-Length': finalBuffer.length.toString(),
+          'Content-Range': `bytes ${currentOffset}-${endByte}/${finalTotal}`,
+        },
+        body: finalBuffer,
+        signal: params.signal,
+      });
+
+      if (res.statusCode === 200 || res.statusCode === 201) {
+        const bodyText = await res.body.text();
+        try {
+          const json = JSON.parse(bodyText);
+          driveFileId = json.id;
+        } catch {}
+      } else {
+        const errText = await res.body.text();
+        throw new Error(`Google Drive finalize failed (${res.statusCode}): ${errText}`);
+      }
+    } else if (!driveFileId && finalTotal === 0n) {
+      const res = await request(resumableUri, {
+        method: 'PUT',
+        headers: {
+          'Content-Length': '0',
+          'Content-Range': 'bytes */0',
+        },
+        signal: params.signal,
+      });
+      if (res.statusCode === 200 || res.statusCode === 201) {
+        const bodyText = await res.body.text();
+        try {
+          const json = JSON.parse(bodyText);
+          driveFileId = json.id;
+        } catch {}
+      }
+    } else if (!driveFileId && finalTotal > 0n) {
+      const res = await request(resumableUri, {
+        method: 'PUT',
+        headers: {
+          'Content-Length': '0',
+          'Content-Range': `bytes */${finalTotal}`,
+        },
+        signal: params.signal,
+      });
+      if (res.statusCode === 200 || res.statusCode === 201) {
+        const bodyText = await res.body.text();
+        try {
+          const json = JSON.parse(bodyText);
+          driveFileId = json.id;
+        } catch {}
+      }
+    }
+
+    return { id: driveFileId, name: params.name };
+  }
+
+  /**
+   * Uploads an individual file stream directly into Google Drive with zero local disk footprint.
    */
   public async uploadFileStream(params: {
     name: string;
     parentId?: string;
     mimeType?: string;
     body: any;
-  }): Promise<drive_v3.Schema$File> {
-    const drive = await this.getDriveClient();
-    const fileMetadata: drive_v3.Schema$File = {
-      name: params.name,
-    };
-    if (params.parentId) {
-      fileMetadata.parents = [params.parentId];
-    }
-
-    const res = await drive.files.create({
-      requestBody: fileMetadata,
-      media: {
-        mimeType: params.mimeType || 'application/octet-stream',
-        body: params.body,
-      },
-      fields: 'id, name, mimeType, size, parents',
-      supportsAllDrives: true,
-    });
-
-    return res.data;
+    totalBytes?: bigint;
+    signal?: AbortSignal;
+  }): Promise<{ id?: string; name: string }> {
+    return this.uploadStreamChunked(params);
   }
 }
 
